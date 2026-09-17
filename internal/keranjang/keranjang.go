@@ -63,7 +63,7 @@ func PersenDiskon(total float64) float64 {
 	switch {
 	case total >= 500:
 		return 20
-	case total >= 100:
+	case total > 100:
 		return 10
 	default:
 		return 0
