@@ -1,0 +1,244 @@
+# =============================================================================
+# PIPELINE CI/CD — GitHub Actions
+#
+# Baca file ini dari atas ke bawah. Ada 5 kata kunci yang perlu kamu tahu:
+#
+#   name:   nama pipeline (muncul di tab Actions)
+#   on:     KAPAN pipeline berjalan
+#   jobs:   APA saja yang dikerjakan
+#   needs:  URUTAN antar job
+#   steps:  PERINTAH di dalam satu job
+#
+# Satu hal yang paling sering bikin bingung pemula:
+#   Setiap job berjalan di KOMPUTER YANG BERBEDA dan BERSIH.
+#   File yang dibuat job A tidak otomatis ada di job B.
+#   Untuk memindahkan file, harus lewat "artifact" (dijelaskan di bawah).
+# =============================================================================
+
+name: Pipeline Keranjang
+
+# -----------------------------------------------------------------------------
+# on: KAPAN pipeline ini berjalan
+# -----------------------------------------------------------------------------
+on:
+  # Setiap push ke branch main
+  push:
+    branches: [main]
+
+  # Setiap pull request yang menuju branch main
+  pull_request:
+    branches: [main]
+
+  # Tombol "Run workflow" manual di tab Actions.
+  # Berguna banget waktu belajar: kamu bisa menjalankan pipeline tanpa
+  # harus bikin commit dulu.
+  workflow_dispatch:
+
+# -----------------------------------------------------------------------------
+# jobs: APA saja yang dikerjakan
+#
+# Perhatikan `needs` di tiap job. Itulah yang membentuk urutan:
+#
+#   build  ──►  test  ──►  image
+#
+# Kalau `build` gagal, `test` tidak dijalankan. Ini disebut FAIL FAST:
+# berhenti di kesalahan pertama, jangan buang waktu di langkah berikutnya.
+# -----------------------------------------------------------------------------
+jobs:
+
+  # ===========================================================================
+  # JOB 1 — BUILD
+  # Tujuan: membuktikan kode bisa dikompilasi.
+  # Ini pemeriksaan paling dasar. Kalau kode tidak bisa di-compile,
+  # tidak ada gunanya lanjut ke test.
+  # ===========================================================================
+  build:
+    name: "1. Build — kompilasi kode"
+    runs-on: ubuntu-latest
+
+    steps:
+      # STEP 1: Ambil kode dari repo ke dalam komputer runner.
+      # Tanpa langkah ini, runner itu kosong — tidak ada file apa pun.
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      # STEP 2: Pasang Go di runner.
+      # Runner `ubuntu-latest` sudah punya banyak alat, tapi belum tentu Go.
+      - name: Pasang Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      # STEP 3: Cek format kode.
+      # `gofmt -l .` mencetak nama file yang belum diformat.
+      # Perhatikan: perintah ini SELALU keluar dengan status sukses,
+      # jadi kita harus memeriksa outputnya sendiri dan sengaja gagal.
+      - name: Cek format kode
+        run: |
+          belum_diformat=$(gofmt -l .)
+          if [ -n "$belum_diformat" ]; then
+            echo "::error::File berikut belum diformat:"
+            echo "$belum_diformat"
+            echo "Perbaiki dengan: gofmt -w ."
+            exit 1
+          fi
+          echo "Semua file sudah diformat dengan rapi."
+
+      # STEP 4: Kompilasi.
+      # Ini yang membuktikan kode bisa jadi program.
+      - name: Kompilasi
+        run: go build -o bin/keranjang ./cmd/keranjang
+
+      # STEP 5: Unggah hasil kompilasi sebagai "artifact".
+      #
+      # INGAT: job berikutnya berjalan di komputer LAIN. Jadi hasil build
+      # harus diunggah supaya bisa diunduh job berikutnya.
+      # Anggap artifact ini seperti "file yang ditempel di grup chat" —
+      # job lain bisa mengambilnya.
+      - name: Unggah hasil build
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-keranjang
+          path: bin/keranjang
+          retention-days: 7
+
+  # ===========================================================================
+  # JOB 2 — TEST
+  # Tujuan: membuktikan kode berperilaku BENAR.
+  #
+  # Bedanya dengan job build:
+  #   build lulus = "kode bisa jadi program"
+  #   test  lulus = "programnya melakukan hal yang benar"
+  #
+  # Kode yang tidak bisa dikompilasi jelas salah. Tapi kode yang BISA
+  # dikompilasi belum tentu benar — dan itu yang diperiksa di sini.
+  # ===========================================================================
+  test:
+    name: "2. Test — uji perilaku kode"
+    runs-on: ubuntu-latest
+
+    # Job ini menunggu job `build` selesai dengan sukses.
+    needs: build
+
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      - name: Pasang Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      # Jalankan test.
+      # -race            : deteksi data race (dua proses akses data bersamaan)
+      # -coverprofile    : simpan laporan seberapa banyak kode teruji
+      # ./...            : jalankan semua test di semua folder
+      - name: Jalankan test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      # Tampilkan ringkasan cakupan test di log pipeline.
+      - name: Tampilkan cakupan test
+        run: go tool cover -func=coverage.out | tail -n 5
+
+      # Unggah laporan cakupan supaya bisa diunduh dan dibaca.
+      # `if: always()` artinya: unggah walaupun test-nya GAGAL.
+      # Justru saat gagal kita paling butuh laporannya.
+      - name: Unggah laporan cakupan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laporan-cakupan
+          path: coverage.out
+          retention-days: 7
+
+  # ===========================================================================
+  # JOB 3 — IMAGE
+  # Tujuan: mengemas aplikasi menjadi Docker image, siap dikirim ke server.
+  #
+  # Perhatikan `if:` di bawah: job ini DILEWATI kalau yang memicu pipeline
+  # adalah pull request.
+  #
+  # Kenapa? Karena pull request belum tentu akan digabung ke main. Kode yang
+  # belum disetujui tidak boleh menghasilkan image yang bisa dipakai deploy.
+  #
+  # Bandingkan dengan job `test` di atas yang TIDAK punya `if:` — dia selalu
+  # jalan. Jadi di pull request, kamu tetap dapat umpan balik "test-nya lulus
+  # atau tidak", tapi tanpa membuang waktu membuat image.
+  # ===========================================================================
+  image:
+    name: "3. Image — bungkus jadi Docker image"
+    runs-on: ubuntu-latest
+
+    needs: test
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      # Bangun Docker image dari Dockerfile kita.
+      #
+      # Perhatikan penamaan tag di bawah. Ada DUA tag sekaligus:
+      #   - sha-<kode commit>  : tag unik, tidak akan pernah berubah
+      #   - latest             : tag bergerak, selalu menunjuk versi terbaru
+      #
+      # Untuk DEPLOY, selalu pakai yang SHA. Alasannya: kalau kamu deploy
+      # "latest" dan ternyata bermasalah, kamu tidak punya cara kembali ke
+      # versi sebelumnya — karena "latest" sudah berubah menunjuk yang baru.
+      # Dengan tag SHA, versi lama masih ada dan bisa dipanggil kembali.
+      - name: Bangun image
+        run: |
+          docker build \
+            --build-arg VERSION=sha-${GITHUB_SHA::7} \
+            --build-arg COMMIT=${GITHUB_SHA::7} \
+            -t keranjang:sha-${GITHUB_SHA::7} \
+            -t keranjang:latest \
+            .
+
+      # Buktikan image-nya benar-benar bisa dijalankan.
+      # Build sukses belum berarti aplikasinya jalan — bisa saja binary-nya
+      # salah path, atau port-nya bentrok. Kita uji sekarang, di pipeline,
+      # bukan nanti di server.
+      - name: Buktikan image bisa jalan
+        run: |
+          docker run -d --name uji -p 8080:8080 keranjang:sha-${GITHUB_SHA::7}
+
+          # Tunggu sampai aplikasi benar-benar siap (maksimal 30 detik).
+          # "Container sudah dijalankan" TIDAK SAMA DENGAN "aplikasi siap".
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8080/healthz > /dev/null 2>&1; then
+              echo "Aplikasi siap setelah ${i} detik."
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::Aplikasi tidak siap setelah 30 detik."
+              docker logs uji
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Uji endpoint utamanya benar-benar berfungsi.
+          curl -sf -X POST http://127.0.0.1:8080/api/hitung \
+            -H 'Content-Type: application/json' \
+            -d '{"items":[{"nama":"kopi","harga":25000,"jumlah":2}]}'
+
+          echo ""
+          echo "Image berhasil dijalankan dan endpoint-nya berfungsi."
+
+          docker rm -f uji
+
+      # Simpan image sebagai file, lalu unggah sebagai artifact.
+      #
+      # Di perusahaan sungguhan, langkah ini diganti dengan `docker push`
+      # ke registry (Docker Hub, GHCR, ECR). Kita pakai artifact supaya
+      # study case ini bisa berjalan TANPA akun registry apa pun.
+      - name: Simpan image sebagai file
+        run: docker save keranjang:sha-${GITHUB_SHA::7} | gzip > keranjang-image.tar.gz
+
+      - name: Unggah image
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-keranjang
+          path: keranjang-image.tar.gz
+          retention-days: 7

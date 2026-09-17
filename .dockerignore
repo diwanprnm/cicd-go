@@ -1,0 +1,16 @@
+# Apa yang TIDAK dikirim ke Docker saat build.
+#
+# Kalau baris ini tidak ada, `COPY . .` akan mengirim SELURUH folder ke
+# Docker daemon — termasuk .git dan file build lama. Akibatnya:
+#   1. Build lambat, karena mengirim file yang tidak dipakai
+#   2. Cache sering batal, karena file yang berubah tidak relevan
+#   3. .git berisi seluruh riwayat repo — bisa membocorkan secret lama
+
+.git
+.gitignore
+.github
+bin/
+dist/
+coverage.out
+*.exe
+README.md
